@@ -1,6 +1,11 @@
 import { Database } from "bun:sqlite";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
+// The Agent SDK spawns `claude` as a subprocess. When this script is run from
+// inside a Claude Code session, CLAUDECODE is set and the spawn is blocked.
+// Unsetting it here allows the subprocess to start normally.
+delete process.env.CLAUDECODE;
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 interface Bookmark {
