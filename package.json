@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "scripts": {
     "fetch": "bun run fetch-bookmarks.ts",
-    "summarize": "bun run summarize-bookmarks.ts"
+    "summarize": "bun run summarize-bookmarks.ts",
+    "visualize": "bun run visualize.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0"
