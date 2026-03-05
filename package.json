@@ -2,6 +2,10 @@
   "name": "x-bookmarks",
   "version": "1.0.0",
   "scripts": {
-    "fetch": "bun run fetch-bookmarks.ts"
+    "fetch": "bun run fetch-bookmarks.ts",
+    "summarize": "bun run summarize-bookmarks.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.78.0"
   }
 }
