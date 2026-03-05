@@ -1,10 +1,5 @@
 import { Database } from "bun:sqlite";
-import { query } from "@anthropic-ai/claude-agent-sdk";
-
-// The Agent SDK spawns `claude` as a subprocess. When this script is run from
-// inside a Claude Code session, CLAUDECODE is set and the spawn is blocked.
-// Unsetting it here allows the subprocess to start normally.
-delete process.env.CLAUDECODE;
+import Anthropic from "@anthropic-ai/sdk";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -23,6 +18,10 @@ interface TcoUrl {
 }
 
 type BookmarkType = "external_link" | "x_article" | "long_tweet" | "simple";
+
+// ── Client ────────────────────────────────────────────────────────────────────
+
+const anthropic = new Anthropic();
 
 // ── Database ──────────────────────────────────────────────────────────────────
 
@@ -124,8 +123,8 @@ Rules:
 • If the content is inaccessible, paywalled, or not worth summarising (e.g. just a photo/video with no text), reply with exactly: SKIP`;
 
 /**
- * Use the Agent SDK (WebFetch tool) to fetch the URL, then summarise it.
- * Returns null when the content is inaccessible or not worth summarising.
+ * Fetch the URL server-side via the web_fetch tool and summarise it.
+ * Uses the Anthropic API directly — no Claude CLI subprocess needed.
  */
 async function summarizeExternalUrl(
   url: string,
@@ -133,68 +132,78 @@ async function summarizeExternalUrl(
 ): Promise<string | null> {
   console.log(`    ↳ Fetching: ${url}`);
 
-  const prompt = `${SYSTEM_INSTRUCTION}
+  const messages: Anthropic.MessageParam[] = [
+    {
+      role: "user",
+      content: `${SYSTEM_INSTRUCTION}
 
 The bookmarked tweet says:
 "${tweetText}"
 
 Fetch the article at ${url} and return a bullet-point summary of its actionable takeaways.
-Return ONLY the bullets, or SKIP.`;
-
-  let result = "";
-
-  for await (const message of query({
-    prompt,
-    options: {
-      allowedTools: ["WebFetch"],
-      maxTurns: 5,
-      model: "claude-opus-4-6",
+Return ONLY the bullets, or SKIP.`,
     },
-  })) {
-    if ("result" in message) {
-      result = message.result ?? "";
+  ];
+
+  // The web_fetch tool runs server-side — the API fetches the URL and feeds
+  // the content to Claude automatically. We just loop on pause_turn in case
+  // the server-side loop needs more than one iteration.
+  for (let i = 0; i < 5; i++) {
+    const response = await anthropic.messages.create({
+      model: "claude-opus-4-6",
+      max_tokens: 2048,
+      // @ts-ignore — web_fetch_20260209 may not yet be in the SDK types
+      tools: [{ type: "web_fetch_20260209", name: "web_fetch" }],
+      messages,
+    });
+
+    if (response.stop_reason === "end_turn") {
+      const text =
+        response.content.find((b): b is Anthropic.TextBlock => b.type === "text")
+          ?.text ?? "";
+      const trimmed = text.trim();
+      return !trimmed || trimmed === "SKIP" ? null : trimmed;
     }
+
+    if (response.stop_reason === "pause_turn") {
+      // Server-side loop hit its iteration limit — re-send to continue.
+      messages.push({ role: "assistant", content: response.content });
+      continue;
+    }
+
+    break; // unexpected stop reason
   }
 
-  const trimmed = result.trim();
-  if (!trimmed || trimmed === "SKIP") return null;
-  return trimmed;
+  return null;
 }
 
-/**
- * Summarise text-only content (X articles / long tweets) without needing
- * to fetch any URL.
- */
+/** Summarise text-only content (X articles / long tweets). */
 async function summarizeText(
   content: string,
   label: string
 ): Promise<string | null> {
-  const prompt = `${SYSTEM_INSTRUCTION}
+  const response = await anthropic.messages.create({
+    model: "claude-opus-4-6",
+    max_tokens: 2048,
+    messages: [
+      {
+        role: "user",
+        content: `${SYSTEM_INSTRUCTION}
 
 Summarise this ${label}:
 
 ${content}
 
-Return ONLY the bullet-point summary, or SKIP if there is nothing actionable.`;
+Return ONLY the bullet-point summary, or SKIP if there is nothing actionable.`,
+      },
+    ],
+  });
 
-  let result = "";
-
-  for await (const message of query({
-    prompt,
-    options: {
-      allowedTools: [],
-      maxTurns: 2,
-      model: "claude-opus-4-6",
-    },
-  })) {
-    if ("result" in message) {
-      result = message.result ?? "";
-    }
-  }
-
-  const trimmed = result.trim();
-  if (!trimmed || trimmed === "SKIP") return null;
-  return trimmed;
+  const text =
+    response.content.find((b): b is Anthropic.TextBlock => b.type === "text")
+      ?.text ?? "";
+  const trimmed = text.trim();
+  return !trimmed || trimmed === "SKIP" ? null : trimmed;
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -208,31 +217,35 @@ async function main() {
 
   // Optional --limit N argument
   const limitArg = process.argv.indexOf("--limit");
-  const limit = limitArg !== -1 ? parseInt(process.argv[limitArg + 1], 10) : null;
+  const limit =
+    limitArg !== -1 ? parseInt(process.argv[limitArg + 1], 10) : null;
   if (limit !== null && (isNaN(limit) || limit < 1)) {
     console.error("--limit must be a positive integer.");
     process.exit(1);
   }
 
-  const query_ = limit
-    ? `SELECT tweet_id, text, author_name, author_screen_name, raw_json
-       FROM bookmarks
-       WHERE link_summary IS NULL
-       ORDER BY fetched_at DESC
-       LIMIT ${limit}`
-    : `SELECT tweet_id, text, author_name, author_screen_name, raw_json
-       FROM bookmarks
-       WHERE link_summary IS NULL
-       ORDER BY fetched_at DESC`;
+  const query =
+    limit != null
+      ? `SELECT tweet_id, text, author_name, author_screen_name, raw_json
+         FROM bookmarks
+         WHERE link_summary IS NULL
+         ORDER BY fetched_at DESC
+         LIMIT ${limit}`
+      : `SELECT tweet_id, text, author_name, author_screen_name, raw_json
+         FROM bookmarks
+         WHERE link_summary IS NULL
+         ORDER BY fetched_at DESC`;
 
-  const bookmarks = db.query<Bookmark, []>(query_).all();
+  const bookmarks = db.query<Bookmark, []>(query).all();
 
   if (bookmarks.length === 0) {
     console.log("All bookmarks already have summaries. Nothing to do.");
     return;
   }
 
-  console.log(`Processing ${bookmarks.length} bookmarks${limit ? ` (limit: ${limit})` : ""}...\n`);
+  console.log(
+    `Processing ${bookmarks.length} bookmarks${limit != null ? ` (limit: ${limit})` : ""}...\n`
+  );
 
   let summarized = 0;
   let skipped = 0;
@@ -246,10 +259,9 @@ async function main() {
 
     // Simple tweets need no summary — mark as processed and move on
     if (type === "simple") {
-      db.run(
-        "UPDATE bookmarks SET link_summary = '' WHERE tweet_id = ?",
-        [bookmark.tweet_id]
-      );
+      db.run("UPDATE bookmarks SET link_summary = '' WHERE tweet_id = ?", [
+        bookmark.tweet_id,
+      ]);
       console.log("  → Simple tweet, skipping\n");
       skipped++;
       continue;
@@ -270,7 +282,7 @@ async function main() {
         case "external_link":
           for (const url of externalUrls) {
             summary = await summarizeExternalUrl(url, bookmark.text);
-            if (summary) break; // Stop at the first URL that yields content
+            if (summary) break;
           }
           break;
       }
@@ -288,17 +300,15 @@ async function main() {
       console.log(`  → Summarised (${summary.split("\n").length} bullets)\n`);
       summarized++;
     } else {
-      // Processed but no usable summary (paywalled, image-only, etc.)
-      db.run(
-        "UPDATE bookmarks SET link_summary = '' WHERE tweet_id = ?",
-        [bookmark.tweet_id]
-      );
+      db.run("UPDATE bookmarks SET link_summary = '' WHERE tweet_id = ?", [
+        bookmark.tweet_id,
+      ]);
       console.log("  → No summary extracted, marked as processed\n");
       skipped++;
     }
 
     // Polite delay between API calls
-    if (i < bookmarks.length - 1) await Bun.sleep(1000);
+    if (i < bookmarks.length - 1) await Bun.sleep(500);
   }
 
   console.log(

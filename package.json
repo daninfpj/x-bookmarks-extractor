@@ -6,6 +6,6 @@
     "summarize": "bun run summarize-bookmarks.ts"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.69"
+    "@anthropic-ai/sdk": "^0.78.0"
   }
 }
