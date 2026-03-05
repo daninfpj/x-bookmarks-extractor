@@ -126,10 +126,31 @@ Rules:
 • Do NOT include intros, outros, or meta-commentary.
 • If the content is inaccessible, paywalled, or not worth summarising (e.g. just a photo/video with no text), reply with exactly: SKIP`;
 
-/**
- * Fetch the URL server-side via the web_fetch tool and summarise it.
- * Uses the Anthropic API directly — no Claude CLI subprocess needed.
- */
+/** Fetch a URL and return its text content, with HTML tags stripped. */
+async function fetchPageText(url: string): Promise<string | null> {
+  const res = await fetch(url, {
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      Accept: "text/html,application/xhtml+xml,*/*",
+    },
+    signal: AbortSignal.timeout(15_000),
+  });
+
+  if (!res.ok) return null;
+
+  const html = await res.text();
+  const text = html
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return text.length > 100 ? text.slice(0, 15_000) : null;
+}
+
+/** Fetch the URL ourselves and ask Claude to summarise the extracted text. */
 async function summarizeExternalUrl(
   url: string,
   tweetText: string,
@@ -137,49 +158,40 @@ async function summarizeExternalUrl(
 ): Promise<string | null> {
   console.log(`    ↳ Fetching: ${url}`);
 
-  const messages: Anthropic.MessageParam[] = [
-    {
-      role: "user",
-      content: `${SYSTEM_INSTRUCTION}
+  let pageText: string | null;
+  try {
+    pageText = await fetchPageText(url);
+  } catch {
+    return null;
+  }
+
+  if (!pageText) return null;
+
+  const response = await anthropic.messages.create({
+    model,
+    max_tokens: 1024,
+    messages: [
+      {
+        role: "user",
+        content: `${SYSTEM_INSTRUCTION}
 
 The bookmarked tweet says:
 "${tweetText}"
 
-Fetch the article at ${url} and return a bullet-point summary of its actionable takeaways.
+Summarise the key actionable takeaways from this article:
+
+${pageText}
+
 Return ONLY the bullets, or SKIP.`,
-    },
-  ];
+      },
+    ],
+  });
 
-  // The web_fetch tool runs server-side — the API fetches the URL and feeds
-  // the content to Claude automatically. We just loop on pause_turn in case
-  // the server-side loop needs more than one iteration.
-  for (let i = 0; i < 5; i++) {
-    const response = await anthropic.messages.create({
-      model,
-      max_tokens: 2048,
-      // @ts-ignore — web_fetch_20260209 may not yet be in the SDK types
-      tools: [{ type: "web_fetch_20260209", name: "web_fetch" }],
-      messages,
-    });
-
-    if (response.stop_reason === "end_turn") {
-      const text =
-        response.content.find((b): b is Anthropic.TextBlock => b.type === "text")
-          ?.text ?? "";
-      const trimmed = text.trim();
-      return !trimmed || trimmed === "SKIP" ? null : trimmed;
-    }
-
-    if (response.stop_reason === "pause_turn") {
-      // Server-side loop hit its iteration limit — re-send to continue.
-      messages.push({ role: "assistant", content: response.content });
-      continue;
-    }
-
-    break; // unexpected stop reason
-  }
-
-  return null;
+  const text =
+    response.content.find((b): b is Anthropic.TextBlock => b.type === "text")
+      ?.text ?? "";
+  const trimmed = text.trim();
+  return !trimmed || trimmed === "SKIP" ? null : trimmed;
 }
 
 /** Summarise text-only content (X articles / long tweets). */
@@ -239,12 +251,12 @@ async function main() {
       ? `SELECT tweet_id, text, author_name, author_screen_name, raw_json
          FROM bookmarks
          WHERE link_summary IS NULL
-         ORDER BY fetched_at DESC
+         ORDER BY rowid ASC
          LIMIT ${limit}`
       : `SELECT tweet_id, text, author_name, author_screen_name, raw_json
          FROM bookmarks
          WHERE link_summary IS NULL
-         ORDER BY fetched_at DESC`;
+         ORDER BY rowid ASC`;
 
   const bookmarks = db.query<Bookmark, []>(query).all();
 
