@@ -1,0 +1,7 @@
+{
+  "name": "x-bookmarks",
+  "version": "1.0.0",
+  "scripts": {
+    "fetch": "bun run fetch-bookmarks.ts"
+  }
+}
