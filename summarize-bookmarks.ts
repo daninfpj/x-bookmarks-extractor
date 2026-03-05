@@ -201,21 +201,33 @@ async function main() {
     process.exit(1);
   }
 
-  const bookmarks = db
-    .query<Bookmark, []>(
-      `SELECT tweet_id, text, author_name, author_screen_name, raw_json
+  // Optional --limit N argument
+  const limitArg = process.argv.indexOf("--limit");
+  const limit = limitArg !== -1 ? parseInt(process.argv[limitArg + 1], 10) : null;
+  if (limit !== null && (isNaN(limit) || limit < 1)) {
+    console.error("--limit must be a positive integer.");
+    process.exit(1);
+  }
+
+  const query_ = limit
+    ? `SELECT tweet_id, text, author_name, author_screen_name, raw_json
        FROM bookmarks
        WHERE link_summary IS NULL
-       ORDER BY fetched_at DESC`
-    )
-    .all();
+       ORDER BY fetched_at DESC
+       LIMIT ${limit}`
+    : `SELECT tweet_id, text, author_name, author_screen_name, raw_json
+       FROM bookmarks
+       WHERE link_summary IS NULL
+       ORDER BY fetched_at DESC`;
+
+  const bookmarks = db.query<Bookmark, []>(query_).all();
 
   if (bookmarks.length === 0) {
     console.log("All bookmarks already have summaries. Nothing to do.");
     return;
   }
 
-  console.log(`Processing ${bookmarks.length} bookmarks...\n`);
+  console.log(`Processing ${bookmarks.length} bookmarks${limit ? ` (limit: ${limit})` : ""}...\n`);
 
   let summarized = 0;
   let skipped = 0;
