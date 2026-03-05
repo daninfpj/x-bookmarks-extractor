@@ -21,6 +21,10 @@ type BookmarkType = "external_link" | "x_article" | "long_tweet" | "simple";
 
 // ── Client ────────────────────────────────────────────────────────────────────
 
+// Default to Sonnet — fast, cheap, great quality for summarisation.
+// Override with --model claude-opus-4-6 for highest quality.
+const DEFAULT_MODEL = "claude-sonnet-4-6";
+
 const anthropic = new Anthropic();
 
 // ── Database ──────────────────────────────────────────────────────────────────
@@ -128,7 +132,8 @@ Rules:
  */
 async function summarizeExternalUrl(
   url: string,
-  tweetText: string
+  tweetText: string,
+  model: string
 ): Promise<string | null> {
   console.log(`    ↳ Fetching: ${url}`);
 
@@ -150,7 +155,7 @@ Return ONLY the bullets, or SKIP.`,
   // the server-side loop needs more than one iteration.
   for (let i = 0; i < 5; i++) {
     const response = await anthropic.messages.create({
-      model: "claude-opus-4-6",
+      model,
       max_tokens: 2048,
       // @ts-ignore — web_fetch_20260209 may not yet be in the SDK types
       tools: [{ type: "web_fetch_20260209", name: "web_fetch" }],
@@ -180,10 +185,11 @@ Return ONLY the bullets, or SKIP.`,
 /** Summarise text-only content (X articles / long tweets). */
 async function summarizeText(
   content: string,
-  label: string
+  label: string,
+  model: string
 ): Promise<string | null> {
   const response = await anthropic.messages.create({
-    model: "claude-opus-4-6",
+    model,
     max_tokens: 2048,
     messages: [
       {
@@ -224,6 +230,10 @@ async function main() {
     process.exit(1);
   }
 
+  // Optional --model <model-id> argument
+  const modelArg = process.argv.indexOf("--model");
+  const model = modelArg !== -1 ? process.argv[modelArg + 1] : DEFAULT_MODEL;
+
   const query =
     limit != null
       ? `SELECT tweet_id, text, author_name, author_screen_name, raw_json
@@ -244,7 +254,7 @@ async function main() {
   }
 
   console.log(
-    `Processing ${bookmarks.length} bookmarks${limit != null ? ` (limit: ${limit})` : ""}...\n`
+    `Processing ${bookmarks.length} bookmarks${limit != null ? ` (limit: ${limit})` : ""} with ${model}...\n`
   );
 
   let summarized = 0;
@@ -272,16 +282,16 @@ async function main() {
     try {
       switch (type) {
         case "x_article":
-          summary = await summarizeText(noteContent!, "X article / note");
+          summary = await summarizeText(noteContent!, "X article / note", model);
           break;
 
         case "long_tweet":
-          summary = await summarizeText(bookmark.text, "long tweet");
+          summary = await summarizeText(bookmark.text, "long tweet", model);
           break;
 
         case "external_link":
           for (const url of externalUrls) {
-            summary = await summarizeExternalUrl(url, bookmark.text);
+            summary = await summarizeExternalUrl(url, bookmark.text, model);
             if (summary) break;
           }
           break;
