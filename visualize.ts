@@ -58,7 +58,7 @@ function getBookmarks(q: string, filter: string, offset: number) {
            tweet_created_at, link_summary
     FROM bookmarks
     ${where}
-    ORDER BY tweet_created_at DESC
+    ORDER BY rowid ASC
     LIMIT ${PAGE_SIZE} OFFSET ?
   `;
   params.push(offset);
